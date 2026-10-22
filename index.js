@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, SlashCommandBuilder, REST, Routes } = require('discord.js');
 const express = require('express');
 
 const app = express();
@@ -24,13 +24,87 @@ const client = new Client({
 const LOG_CHANNEL_ID = '1562784881140961281';
 const userMessageMap = new Map();
 
-client.once('ready', () => {
+// Güvenlik sisteminin açık/kapalı durumunu tutan Hafıza (Bellek)
+const guildSecurityStatus = new Map();
+
+client.once('ready', async () => {
     console.log(`Koruma botu aktif ve devrede: ${client.user.tag}`);
+
+    const commands = [
+        new SlashCommandBuilder()
+            .setName('güvenlik')
+            .setDescription('Güvenlik sistemini açar veya kapatır.')
+            .addStringOption(option =>
+                option.setName('durum')
+                    .setDescription('Aktif veya inaktif seçin')
+                    .setRequired(true)
+                    .addChoices(
+                        { name: 'Aktif', value: 'aktif' },
+                        { name: 'İnaktif', value: 'inaktif' }
+                    )
+            ),
+        new SlashCommandBuilder()
+            .setName('bilgi')
+            .setDescription('Botun neler yapabildiğini gösterir.')
+    ].map(command => command.toJSON());
+
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('Slash komutları başarıyla yüklendi!');
+    } catch (error) {
+        console.error(error);
+    }
 });
 
-// --- 1. SPAM VE ARD ARDA MESAJ KORUMASI ---
+// --- KOMUT İŞLEYİCİSİ (/güvenlik aktif, /güvenlik inaktif, /bilgi) ---
+client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
+
+    const { commandName, options, guild } = interaction;
+
+    if (commandName === 'güvenlik') {
+        // Sadece yöneticiler kullanabilsin
+        if (!interaction.member.permissions.has('Administrator')) {
+            return interaction.reply({ content: 'Bu komutu kullanmak için **Yönetici** yetkisine sahip olmalısın!', ephemeral: true });
+        }
+
+        const durum = options.getString('durum');
+
+        if (durum === 'aktif') {
+            guildSecurityStatus.set(guild.id, true);
+            return interaction.reply({ content: '🛡️ **Güvenlik sistemi başarıyla AKTİF edildi!** Bot artık sunucuyu koruyor.', ephemeral: true });
+        } else {
+            guildSecurityStatus.set(guild.id, false);
+            return interaction.reply({ content: '⚠️ **Güvenlik sistemi İNAKTİF duruma getirildi!** Koruma özellikleri kapatıldı.', ephemeral: true });
+        }
+    }
+
+    if (commandName === 'bilgi') {
+        const embed = new EmbedBuilder()
+            .setColor(0x00AE86)
+            .setTitle('🛡️ Bot Koruma ve Bilgi Sistemi')
+            .setDescription('Bu bot sunucunuzu zararlı durumlara ve spam saldırılarına karşı korumak için geliştirilmiştir.')
+            .addFields(
+                { name: '⚡ Spam Koruması', value: 'Hızlı mesaj atarak spam yapan kişileri otomatik tespit eder ve susturur.' },
+                { name: '🚨 Kanal / Rol Koruması', value: 'Sunucuda silinen önemli kanal ve rolleri anında log kanalına bildirir.' },
+                { name: '⚠️ Şüpheli Hesap Tespiti', value: 'Sunucuya yeni katılan 3 günden yeni hesapları algılayıp raporlar.' },
+                { name: '⚙️ Komutlar', value: '`/güvenlik aktif` veya `/güvenlik inaktif` komutlarıyla korumayı yönetebilirsiniz.' }
+            )
+            .setTimestamp();
+
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+    }
+});
+
+// --- 1. SPAM KORUMASI ---
 client.on('messageCreate', async (message) => {
     if (!message.guild || message.author.bot) return;
+
+    // Eğer güvenlik inaktifse korumaları çalıştırma
+    const isSecurityActive = guildSecurityStatus.get(message.guild.id) ?? true; // Varsayılan aktif
+    if (!isSecurityActive) return;
 
     const userId = message.author.id;
 
@@ -67,6 +141,9 @@ client.on('messageCreate', async (message) => {
 // --- 2. SUNUCU GÜVENLİK VE RİSK KORUMASI ---
 client.on('channelDelete', async (channel) => {
     try {
+        const isSecurityActive = guildSecurityStatus.get(channel.guild.id) ?? true;
+        if (!isSecurityActive) return;
+
         const logChannel = channel.guild.channels.cache.get(LOG_CHANNEL_ID);
         if (logChannel) {
             const embed = new EmbedBuilder()
@@ -81,6 +158,9 @@ client.on('channelDelete', async (channel) => {
 
 client.on('roleDelete', async (role) => {
     try {
+        const isSecurityActive = guildSecurityStatus.get(role.guild.id) ?? true;
+        if (!isSecurityActive) return;
+
         const logChannel = role.guild.channels.cache.get(LOG_CHANNEL_ID);
         if (logChannel) {
             const embed = new EmbedBuilder()
@@ -95,6 +175,9 @@ client.on('roleDelete', async (role) => {
 
 client.on('guildMemberAdd', async (member) => {
     try {
+        const isSecurityActive = guildSecurityStatus.get(member.guild.id) ?? true;
+        if (!isSecurityActive) return;
+
         const hesapYasiGun = (Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24);
         if (hesapYasiGun < 3) {
             const logChannel = member.guild.channels.cache.get(LOG_CHANNEL_ID);
